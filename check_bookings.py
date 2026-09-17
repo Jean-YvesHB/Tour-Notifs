@@ -42,12 +42,14 @@ TOUR_TIMEZONES = {
     "SydWalk2": ZoneInfo("Australia/Sydney"),
 }
 
-# How many hours before a tour starts to send the reminder.
-REMINDER_LEAD_HOURS = 2
+# How many hours before a tour starts to send a reminder. Add or
+# remove entries here to change which reminders go out.
+REMINDER_LEAD_HOURS = [24, 2]
 
 # How long after a tour's start time to keep it in the "already
-# reminded" list, so that list doesn't grow forever.
-REMINDER_MEMORY_HOURS = 24
+# reminded" list, so that list doesn't grow forever. Must be longer
+# than the largest value in REMINDER_LEAD_HOURS.
+REMINDER_MEMORY_HOURS = 48
 
 
 def load_state():
@@ -146,20 +148,22 @@ def group_into_tour_occurrences(bookings):
     return groups
 
 
-def send_reminder_email(tour_name, start_time_raw, bookings):
+def send_reminder_email(tour_name, start_time_raw, bookings, lead_hours):
     total_adults = sum(b["booked"]["adults"] for b in bookings)
     total_children = sum(b["booked"]["children"] for b in bookings)
     total_infants = sum(b["booked"]["infants"] for b in bookings)
     platforms = sorted(set(b["platform"] for b in bookings))
 
+    when = "tomorrow" if lead_hours >= 24 else f"in about {lead_hours}h"
+
     body = (
-        f"Upcoming tour reminder:\n\n"
+        f"Upcoming tour reminder ({when}):\n\n"
         f"- {tour_name}\n"
         f"  Starts: {format_start_time(start_time_raw)}\n"
         f"  Total guests: {total_adults} adults, {total_children} children, {total_infants} infants\n"
         f"  Bookings: {len(bookings)} ({', '.join(platforms)})"
     )
-    subject = f"Reminder: {tour_name} starts soon"
+    subject = f"Reminder: {tour_name} starts {when}"
 
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -174,11 +178,11 @@ def send_reminder_email(tour_name, start_time_raw, bookings):
 
 def send_reminders(bookings, state, now_utc):
     reminded = set(tuple(item) for item in state["reminded_tours"])
-    lead = timedelta(hours=REMINDER_LEAD_HOURS)
     memory_cutoff = now_utc - timedelta(hours=REMINDER_MEMORY_HOURS)
 
     occurrences = group_into_tour_occurrences(bookings)
     sent_count = 0
+    still_relevant = set()
 
     for (tour_name, start_time_raw), group in occurrences.items():
         # Only remind for tours you actually work -- skip anything else
@@ -187,20 +191,24 @@ def send_reminders(bookings, state, now_utc):
             continue
 
         start_utc = parse_tour_start_utc(tour_name, start_time_raw)
-        key = (tour_name, start_time_raw)
 
         # Drop this tour from memory once it's well in the past.
         if start_utc < memory_cutoff:
-            reminded.discard(key)
             continue
 
-        already_reminded = key in reminded
-        due = now_utc <= start_utc <= now_utc + lead
+        for lead_hours in REMINDER_LEAD_HOURS:
+            key = (tour_name, start_time_raw, lead_hours)
+            still_relevant.add(key)
 
-        if due and not already_reminded:
-            send_reminder_email(tour_name, start_time_raw, group)
-            reminded.add(key)
-            sent_count += 1
+            due = now_utc <= start_utc <= now_utc + timedelta(hours=lead_hours)
+            if due and key not in reminded:
+                send_reminder_email(tour_name, start_time_raw, group, lead_hours)
+                reminded.add(key)
+                sent_count += 1
+
+    # Only keep reminder records for tours still within memory range,
+    # so the list doesn't grow forever.
+    reminded = {key for key in reminded if key in still_relevant}
 
     state["reminded_tours"] = [list(item) for item in reminded]
     return sent_count
