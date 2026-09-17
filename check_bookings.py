@@ -11,8 +11,10 @@ import os
 import json
 import smtplib
 import ssl
+from collections import defaultdict
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -32,13 +34,29 @@ BASE_URL = "https://www.tourdash.app/api/v1/bookings"
 # How far ahead to look for upcoming tours each run.
 LOOKAHEAD_DAYS = 60
 
+# TourDash gives tour start times with no UTC offset -- this is the
+# timezone those times are actually in.
+TOUR_TIMEZONE = ZoneInfo("Australia/Sydney")
+
+# How many hours before a tour starts to send the reminder.
+REMINDER_LEAD_HOURS = 2
+
+# How long after a tour's start time to keep it in the "already
+# reminded" list, so that list doesn't grow forever.
+REMINDER_MEMORY_HOURS = 24
+
 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            return json.load(f)
+            state = json.load(f)
+            state.setdefault("reminded_tours", [])
+            return state
     # First-ever run: only flag bookings received from now on.
-    return {"last_checked": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return {
+        "last_checked": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reminded_tours": [],
+    }
 
 
 def save_state(state):
@@ -67,11 +85,19 @@ def fetch_all_bookings(date_from, date_to):
     return bookings
 
 
+def format_start_time(raw):
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+        return dt.strftime("%a, %b %d, %Y at %I:%M %p").replace(" 0", " ")
+    except ValueError:
+        return raw  # fall back to raw value if TourDash ever changes the format
+
+
 def send_email(new_bookings):
     lines = []
     for b in new_bookings:
         tour = b["tour"]["name"]
-        start = b["tour"]["start_time"]
+        start = format_start_time(b["tour"]["start_time"])
         booked = b["booked"]
         platform = b["platform"]
         lines.append(
@@ -82,7 +108,8 @@ def send_email(new_bookings):
         )
 
     body = "New TourDash booking(s):\n\n" + "\n\n".join(lines)
-    subject = f"TourDash: {len(new_bookings)} new booking(s)"
+    count = len(new_bookings)
+    subject = f"TourDash: {count} new booking" + ("" if count == 1 else "s")
 
     msg = MIMEText(body)
     msg["Subject"] = subject
@@ -93,6 +120,79 @@ def send_email(new_bookings):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
+
+
+def parse_tour_start_utc(raw):
+    """TourDash gives start_time with no offset; interpret it in TOUR_TIMEZONE."""
+    naive = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+    local = naive.replace(tzinfo=TOUR_TIMEZONE)
+    return local.astimezone(timezone.utc)
+
+
+def group_into_tour_occurrences(bookings):
+    """Combine bookings that belong to the same tour session (same name + start time)."""
+    groups = defaultdict(list)
+    for b in bookings:
+        if b["status"] == "cancelled":
+            continue
+        key = (b["tour"]["name"], b["tour"]["start_time"])
+        groups[key].append(b)
+    return groups
+
+
+def send_reminder_email(tour_name, start_time_raw, bookings):
+    total_adults = sum(b["booked"]["adults"] for b in bookings)
+    total_children = sum(b["booked"]["children"] for b in bookings)
+    total_infants = sum(b["booked"]["infants"] for b in bookings)
+    platforms = sorted(set(b["platform"] for b in bookings))
+
+    body = (
+        f"Upcoming tour reminder:\n\n"
+        f"- {tour_name}\n"
+        f"  Starts: {format_start_time(start_time_raw)}\n"
+        f"  Total guests: {total_adults} adults, {total_children} children, {total_infants} infants\n"
+        f"  Bookings: {len(bookings)} ({', '.join(platforms)})"
+    )
+    subject = f"Reminder: {tour_name} starts soon"
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = ", ".join(NOTIFY_EMAILS)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
+
+
+def send_reminders(bookings, state, now_utc):
+    reminded = set(tuple(item) for item in state["reminded_tours"])
+    lead = timedelta(hours=REMINDER_LEAD_HOURS)
+    memory_cutoff = now_utc - timedelta(hours=REMINDER_MEMORY_HOURS)
+
+    occurrences = group_into_tour_occurrences(bookings)
+    sent_count = 0
+
+    for (tour_name, start_time_raw), group in occurrences.items():
+        start_utc = parse_tour_start_utc(start_time_raw)
+        key = (tour_name, start_time_raw)
+
+        # Drop this tour from memory once it's well in the past.
+        if start_utc < memory_cutoff:
+            reminded.discard(key)
+            continue
+
+        already_reminded = key in reminded
+        due = now_utc <= start_utc <= now_utc + lead
+
+        if due and not already_reminded:
+            send_reminder_email(tour_name, start_time_raw, group)
+            reminded.add(key)
+            sent_count += 1
+
+    state["reminded_tours"] = [list(item) for item in reminded]
+    return sent_count
 
 
 def main():
@@ -121,6 +221,12 @@ def main():
         print(f"Sent email for {len(new_bookings)} new booking(s).")
     else:
         print("No new bookings.")
+
+    reminder_count = send_reminders(bookings, state, now)
+    if reminder_count:
+        print(f"Sent {reminder_count} tour reminder(s).")
+    else:
+        print("No reminders due.")
 
     state["last_checked"] = max_received.strftime("%Y-%m-%dT%H:%M:%SZ")
     save_state(state)
