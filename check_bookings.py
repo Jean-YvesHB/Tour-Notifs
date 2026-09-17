@@ -27,7 +27,7 @@ NOTIFY_EMAILS = [
 ]
 
 STATE_FILE = "state.json"
-BASE_URL = "https://tourdash.app/api/v1/bookings"
+BASE_URL = "https://www.tourdash.app/api/v1/bookings"
 
 # How far ahead to look for upcoming tours each run.
 LOOKAHEAD_DAYS = 60
