@@ -1,25 +1,25 @@
 name: Check TourDash Bookings
- 
+
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
- 
+
 permissions:
   contents: write
- 
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
- 
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
- 
+
       - run: pip install requests
- 
+
       - name: Run booking check
         env:
           TOURDASH_API_KEY: ${{ secrets.TOURDASH_API_KEY }}
@@ -27,7 +27,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python check_bookings.py
- 
+
       - name: Commit updated state
         run: |
           git config user.name "tourdash-bot"
