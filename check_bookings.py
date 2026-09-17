@@ -19,7 +19,12 @@ import requests
 API_KEY = os.environ["TOURDASH_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS)
+# Comma-separated list, e.g. "you@example.com, boss@example.com"
+NOTIFY_EMAILS = [
+    addr.strip()
+    for addr in os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS).split(",")
+    if addr.strip()
+]
 
 STATE_FILE = "state.json"
 BASE_URL = "https://tourdash.app/api/v1/bookings"
@@ -82,12 +87,12 @@ def send_email(new_bookings):
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = GMAIL_ADDRESS
-    msg["To"] = NOTIFY_EMAIL
+    msg["To"] = ", ".join(NOTIFY_EMAILS)
 
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, [NOTIFY_EMAIL], msg.as_string())
+        server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
 
 
 def main():
