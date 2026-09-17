@@ -34,9 +34,13 @@ BASE_URL = "https://www.tourdash.app/api/v1/bookings"
 # How far ahead to look for upcoming tours each run.
 LOOKAHEAD_DAYS = 60
 
-# TourDash gives tour start times with no UTC offset -- this is the
-# timezone those times are actually in.
-TOUR_TIMEZONE = ZoneInfo("Australia/Sydney")
+# TourDash gives tour start times with no UTC offset, so we have to know
+# which city each tour code runs in to interpret the time correctly.
+# Add an entry here whenever you or your boss start covering a new tour.
+TOUR_TIMEZONES = {
+    "SydWalk1": ZoneInfo("Australia/Sydney"),
+    "SydWalk2": ZoneInfo("Australia/Sydney"),
+}
 
 # How many hours before a tour starts to send the reminder.
 REMINDER_LEAD_HOURS = 2
@@ -122,10 +126,12 @@ def send_email(new_bookings):
         server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
 
 
-def parse_tour_start_utc(raw):
-    """TourDash gives start_time with no offset; interpret it in TOUR_TIMEZONE."""
+def parse_tour_start_utc(tour_name, raw):
+    """TourDash gives start_time with no offset; interpret it in that
+    tour's own timezone."""
+    tz = TOUR_TIMEZONES[tour_name]
     naive = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
-    local = naive.replace(tzinfo=TOUR_TIMEZONE)
+    local = naive.replace(tzinfo=tz)
     return local.astimezone(timezone.utc)
 
 
@@ -175,7 +181,12 @@ def send_reminders(bookings, state, now_utc):
     sent_count = 0
 
     for (tour_name, start_time_raw), group in occurrences.items():
-        start_utc = parse_tour_start_utc(start_time_raw)
+        # Only remind for tours you actually work -- skip anything else
+        # the company runs elsewhere.
+        if tour_name not in TOUR_TIMEZONES:
+            continue
+
+        start_utc = parse_tour_start_utc(tour_name, start_time_raw)
         key = (tour_name, start_time_raw)
 
         # Drop this tour from memory once it's well in the past.
@@ -204,6 +215,7 @@ def main():
     date_to = (now + timedelta(days=LOOKAHEAD_DAYS)).strftime("%Y-%m-%d")
 
     bookings = fetch_all_bookings(date_from, date_to)
+    bookings = [b for b in bookings if b["tour"]["name"] in TOUR_TIMEZONES]
 
     new_bookings = []
     max_received = last_checked_dt
