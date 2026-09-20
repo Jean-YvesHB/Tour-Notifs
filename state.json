@@ -1,4 +1,10 @@
 {
-  "last_checked": "2026-09-19T23:36:44Z",
-  "reminded_tours": []
+  "last_checked": "2026-09-20T01:09:46Z",
+  "reminded_tours": [
+    [
+      "SydWalk1",
+      "2026-09-21T10:00:00",
+      24
+    ]
+  ]
 }
