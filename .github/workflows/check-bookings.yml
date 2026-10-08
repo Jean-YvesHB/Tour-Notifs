@@ -25,7 +25,7 @@ jobs:
           TOURDASH_API_KEY: ${{ secrets.TOURDASH_API_KEY }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
         run: python check_bookings.py
 
       - name: Commit updated state
