@@ -21,12 +21,22 @@ import requests
 API_KEY = os.environ["TOURDASH_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-# Comma-separated list, e.g. "you@example.com, boss@example.com"
-NOTIFY_EMAILS = [
-    addr.strip()
-    for addr in os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS).split(",")
-    if addr.strip()
-]
+
+
+def parse_recipients(env_name):
+    """Read a comma-separated list of addresses from an environment
+    variable, e.g. "you@example.com, boss@example.com". If the variable
+    is empty or missing, fall back to the company Gmail address so
+    alerts are never silently dropped."""
+    addrs = [a.strip() for a in os.environ.get(env_name, "").split(",") if a.strip()]
+    return addrs or [GMAIL_ADDRESS]
+
+
+# One mailing list per group of guides. Each is its own GitHub variable.
+RECIPIENTS = {
+    "sydney": parse_recipients("NOTIFY_EMAIL"),
+    "melbourne": parse_recipients("NOTIFY_EMAIL_MELBOURNE"),
+}
 
 STATE_FILE = "state.json"
 BASE_URL = "https://www.tourdash.app/api/v1/bookings"
@@ -36,11 +46,16 @@ LOOKAHEAD_DAYS = 60
 
 # TourDash gives tour start times with no UTC offset, so we have to know
 # which city each tour code runs in to interpret the time correctly.
-# Add an entry here whenever you or your boss start covering a new tour.
-TOUR_TIMEZONES = {
-    "SydWalk1": ZoneInfo("Australia/Sydney"),
-    "SydWalk2": ZoneInfo("Australia/Sydney"),
+# Each tour also belongs to a recipient group (a key of RECIPIENTS above),
+# which decides who gets its alerts and reminders.
+# Add an entry here whenever a new tour code needs covering.
+TOUR_CONFIG = {
+    "SydWalk1": (ZoneInfo("Australia/Sydney"), "sydney"),
+    "SydWalk2": (ZoneInfo("Australia/Sydney"), "sydney"),
+    "MelWalk1": (ZoneInfo("Australia/Melbourne"), "melbourne"),
 }
+TOUR_TIMEZONES = {name: tz for name, (tz, _) in TOUR_CONFIG.items()}
+TOUR_GROUPS = {name: group for name, (_, group) in TOUR_CONFIG.items()}
 
 # How many hours before a tour starts to send a reminder. Add or
 # remove entries here to change which reminders go out.
@@ -99,7 +114,31 @@ def format_start_time(raw):
         return raw  # fall back to raw value if TourDash ever changes the format
 
 
+def notify(subject, body, recipients):
+    """Send a notification by email to the given list of addresses."""
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = ", ".join(recipients)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_ADDRESS, recipients, msg.as_string())
+
+
 def send_email(new_bookings):
+    """Send new-booking alerts, one email per recipient group, so each
+    group only sees its own tours."""
+    by_group = defaultdict(list)
+    for b in new_bookings:
+        by_group[TOUR_GROUPS[b["tour"]["name"]]].append(b)
+
+    for group, group_bookings in by_group.items():
+        send_group_email(group_bookings, RECIPIENTS[group])
+
+
+def send_group_email(new_bookings, recipients):
     lines = []
     for b in new_bookings:
         tour = b["tour"]["name"]
@@ -117,15 +156,7 @@ def send_email(new_bookings):
     count = len(new_bookings)
     subject = f"TourDash: {count} new booking" + ("" if count == 1 else "s")
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = ", ".join(NOTIFY_EMAILS)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
+    notify(subject, body, recipients)
 
 
 def parse_tour_start_utc(tour_name, raw):
@@ -165,15 +196,7 @@ def send_reminder_email(tour_name, start_time_raw, bookings, lead_hours):
     )
     subject = f"Reminder: {tour_name} starts {when}"
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = ", ".join(NOTIFY_EMAILS)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, NOTIFY_EMAILS, msg.as_string())
+    notify(subject, body, RECIPIENTS[TOUR_GROUPS[tour_name]])
 
 
 def send_reminders(bookings, state, now_utc):
