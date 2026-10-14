@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Never let two runs overlap -- a second run waits for the first to finish.
+concurrency:
+  group: check-bookings
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -34,5 +39,13 @@ jobs:
           git config user.name "tourdash-bot"
           git config user.email "actions@users.noreply.github.com"
           git add state.json
-          git diff --staged --quiet || git commit -m "Update last checked timestamp"
-          git push
+          if git diff --staged --quiet; then exit 0; fi
+          git commit -m "Update last checked timestamp"
+          # If the repo changed while we were running, pull those changes
+          # in (keeping our state.json) and retry the push.
+          for attempt in 1 2 3; do
+            git pull --rebase -X theirs origin "$GITHUB_REF_NAME" \
+              && git push origin "HEAD:$GITHUB_REF_NAME" && exit 0
+            sleep 5
+          done
+          exit 1
