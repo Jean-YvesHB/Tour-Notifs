@@ -32,6 +32,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ vars.NOTIFY_EMAIL }}
           NOTIFY_EMAIL_MELBOURNE: ${{ vars.NOTIFY_EMAIL_MELBOURNE }}
+          REMINDER_EXCLUDE: ${{ vars.REMINDER_EXCLUDE }}
         run: python check_bookings.py
 
       - name: Commit updated state
