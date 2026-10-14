@@ -32,6 +32,14 @@ def parse_recipients(env_name):
     return addrs or [GMAIL_ADDRESS]
 
 
+# Addresses listed here still get new-booking alerts, but are left out
+# of reminder emails. Set via the REMINDER_EXCLUDE GitHub variable.
+REMINDER_EXCLUDE = {
+    a.strip().lower()
+    for a in os.environ.get("REMINDER_EXCLUDE", "").split(",")
+    if a.strip()
+}
+
 # One mailing list per group of guides. Each is its own GitHub variable.
 RECIPIENTS = {
     "sydney": parse_recipients("NOTIFY_EMAIL"),
@@ -53,6 +61,7 @@ TOUR_CONFIG = {
     "SydWalk1": (ZoneInfo("Australia/Sydney"), "sydney"),
     "SydWalk2": (ZoneInfo("Australia/Sydney"), "sydney"),
     "MelWalk1": (ZoneInfo("Australia/Melbourne"), "melbourne"),
+    "MelWalk2": (ZoneInfo("Australia/Melbourne"), "melbourne"),
 }
 TOUR_TIMEZONES = {name: tz for name, (tz, _) in TOUR_CONFIG.items()}
 TOUR_GROUPS = {name: group for name, (_, group) in TOUR_CONFIG.items()}
@@ -196,7 +205,15 @@ def send_reminder_email(tour_name, start_time_raw, bookings, lead_hours):
     )
     subject = f"Reminder: {tour_name} starts {when}"
 
-    notify(subject, body, RECIPIENTS[TOUR_GROUPS[tour_name]])
+    recipients = [
+        a for a in RECIPIENTS[TOUR_GROUPS[tour_name]]
+        if a.lower() not in REMINDER_EXCLUDE
+    ]
+    if not recipients:
+        print(f"Skipping reminder for {tour_name}: everyone on its list is excluded.")
+        return
+
+    notify(subject, body, recipients)
 
 
 def send_reminders(bookings, state, now_utc):
