@@ -76,16 +76,28 @@ REMINDER_LEAD_HOURS = [24, 2]
 REMINDER_MEMORY_HOURS = 48
 
 
+def parse_utc(raw):
+    """Parse an ISO timestamp (with 'Z', an offset, and/or fractional
+    seconds) into a timezone-aware UTC datetime. A timestamp with no
+    timezone at all is assumed to already be UTC."""
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             state = json.load(f)
             state.setdefault("reminded_tours", [])
+            state.setdefault("alerted_ids", [])
             return state
     # First-ever run: only flag bookings received from now on.
     return {
-        "last_checked": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "last_checked": datetime.now(timezone.utc).isoformat(),
         "reminded_tours": [],
+        "alerted_ids": [],
     }
 
 
@@ -143,8 +155,17 @@ def send_email(new_bookings):
     for b in new_bookings:
         by_group[TOUR_GROUPS[b["tour"]["name"]]].append(b)
 
+    sent_ids = set()
     for group, group_bookings in by_group.items():
-        send_group_email(group_bookings, RECIPIENTS[group])
+        try:
+            send_group_email(group_bookings, RECIPIENTS[group])
+        except Exception as exc:
+            # One group failing must not stop the others, and must not
+            # cause the groups that did send to be re-alerted next run.
+            print(f"WARNING: alert email for group '{group}' failed: {exc}")
+            continue
+        sent_ids.update(b["id"] for b in group_bookings)
+    return sent_ids
 
 
 def send_group_email(new_bookings, recipients):
@@ -171,10 +192,10 @@ def send_group_email(new_bookings, recipients):
 def parse_tour_start_utc(tour_name, raw):
     """TourDash gives start_time with no offset; interpret it in that
     tour's own timezone."""
-    tz = TOUR_TIMEZONES[tour_name]
-    naive = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
-    local = naive.replace(tzinfo=tz)
-    return local.astimezone(timezone.utc)
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TOUR_TIMEZONES[tour_name])
+    return dt.astimezone(timezone.utc)
 
 
 def group_into_tour_occurrences(bookings):
@@ -230,7 +251,12 @@ def send_reminders(bookings, state, now_utc):
         if tour_name not in TOUR_TIMEZONES:
             continue
 
-        start_utc = parse_tour_start_utc(tour_name, start_time_raw)
+        try:
+            start_utc = parse_tour_start_utc(tour_name, start_time_raw)
+        except ValueError:
+            print(f"WARNING: can't read start time '{start_time_raw}' for "
+                  f"{tour_name}; skipping its reminders.")
+            continue
 
         # Drop this tour from memory once it's well in the past.
         if start_utc < memory_cutoff:
@@ -242,7 +268,11 @@ def send_reminders(bookings, state, now_utc):
 
             due = now_utc <= start_utc <= now_utc + timedelta(hours=lead_hours)
             if due and key not in reminded:
-                send_reminder_email(tour_name, start_time_raw, group, lead_hours)
+                try:
+                    send_reminder_email(tour_name, start_time_raw, group, lead_hours)
+                except Exception as exc:
+                    print(f"WARNING: reminder for {tour_name} failed: {exc}")
+                    continue
                 reminded.add(key)
                 sent_count += 1
 
@@ -256,7 +286,8 @@ def send_reminders(bookings, state, now_utc):
 
 def main():
     state = load_state()
-    last_checked_dt = datetime.fromisoformat(state["last_checked"].replace("Z", "+00:00"))
+    last_checked_dt = parse_utc(state["last_checked"])
+    alerted_ids = set(state["alerted_ids"])
 
     now = datetime.now(timezone.utc)
     date_from = now.strftime("%Y-%m-%d")
@@ -269,18 +300,33 @@ def main():
     max_received = last_checked_dt
 
     for b in bookings:
-        received_at = datetime.fromisoformat(b["received_at"].replace("Z", "+00:00"))
-        if received_at > last_checked_dt:
+        received_at = parse_utc(b["received_at"])
+        # A booking is only "new" if it arrived after the last check AND
+        # we haven't already alerted on its ID -- the ID check is a
+        # safety net so one booking can never trigger repeat emails.
+        if received_at > last_checked_dt and b["id"] not in alerted_ids:
             new_bookings.append(b)
         if received_at > max_received:
             max_received = received_at
 
+    all_sent = True
     if new_bookings:
         new_bookings.sort(key=lambda b: b["received_at"])
-        send_email(new_bookings)
-        print(f"Sent email for {len(new_bookings)} new booking(s).")
+        sent_ids = send_email(new_bookings)
+        alerted_ids |= sent_ids
+        all_sent = len(sent_ids) == len(new_bookings)
+        print(f"Sent alerts for {len(sent_ids)} of {len(new_bookings)} new booking(s).")
     else:
         print("No new bookings.")
+
+    # Save progress NOW, before reminders, so a problem later in the run
+    # can never cause these alerts to be sent again. If any alert failed,
+    # keep the old last_checked so it gets retried next run.
+    if all_sent:
+        state["last_checked"] = max_received.isoformat()
+    current_ids = {b["id"] for b in bookings}
+    state["alerted_ids"] = sorted(alerted_ids & current_ids)
+    save_state(state)
 
     reminder_count = send_reminders(bookings, state, now)
     if reminder_count:
@@ -288,7 +334,6 @@ def main():
     else:
         print("No reminders due.")
 
-    state["last_checked"] = max_received.strftime("%Y-%m-%dT%H:%M:%SZ")
     save_state(state)
 
 
